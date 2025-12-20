@@ -34,6 +34,11 @@ const jwt = require('jsonwebtoken');
 
 class SimpleVectorRAG:
     def __init__(self, config):
+        # Set OpenAI API key in environment if not already set
+        import os
+        if config.OPENAI_API_KEY and not os.getenv("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = config.OPENAI_API_KEY
+        
         self.embeddings = OpenAIEmbeddings(model=config.EMBED_MODEL)
         self.vstore = FAISS.load_local(
             config.METHOD_1_FAISS,

@@ -2,7 +2,7 @@ import pickle
 from pathlib import Path
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
 from typing import List
 
 SYSTEM_PROMPT = """You are a technical assistant for Frontegg documentation.
@@ -31,6 +31,11 @@ Answer structure:
 
 class ParentChildRAG:
     def __init__(self, config):
+        # Set OpenAI API key in environment if not already set
+        import os
+        if config.OPENAI_API_KEY and not os.getenv("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = config.OPENAI_API_KEY
+        
         self.embeddings = OpenAIEmbeddings(model=config.EMBED_MODEL)
         self.store_dir = Path(config.METHOD_2_FAISS)
         
