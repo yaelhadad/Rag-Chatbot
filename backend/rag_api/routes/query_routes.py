@@ -13,14 +13,26 @@ from rag_core.agentic_rag import AgenticRAG
 from rag_api.config import Config
 
 query_bp = Blueprint('query', __name__)
-config = Config()
 
-# Initialize RAG methods once
-rag_methods = {
-    1: SimpleVectorRAG(config),
-    2: ParentChildRAG(config),
-    3: AgenticRAG(config)
-}
+# Initialize config with validation
+try:
+    config = Config()
+except ValueError as e:
+    print(f"Configuration Error: {e}")
+    config = None
+
+# Initialize RAG methods once (only if config is valid)
+rag_methods = {}
+if config:
+    try:
+        rag_methods = {
+            1: SimpleVectorRAG(config),
+            2: ParentChildRAG(config),
+            3: AgenticRAG(config)
+        }
+    except Exception as e:
+        print(f"Error initializing RAG methods: {e}")
+        rag_methods = {}
 
 METHOD_NAMES = {
     1: "Simple Vector RAG",
@@ -56,6 +68,16 @@ def handle_query():
             "success": False,
             "error": {"code": "INVALID_METHOD", "message": "method_id must be 1, 2, or 3"}
         }), 400
+
+    # Check if RAG methods are initialized
+    if not rag_methods:
+        return jsonify({
+            "success": False,
+            "error": {
+                "code": "CONFIG_ERROR",
+                "message": "RAG methods not initialized. Please check your .env file and ensure OPENAI_API_KEY is set."
+            }
+        }), 500
 
     # 2. Execute RAG method
     try:
