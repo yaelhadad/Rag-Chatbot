@@ -185,6 +185,7 @@ Content-Type: application/json
 
 ## Troubleshooting
 
+
 ### Backend Issues
 
 **Import Errors:**
@@ -224,3 +225,178 @@ python app.py  # Runs with debug=True
 cd frontend
 npm run dev    # Hot reload enabled
 ```
+
+## Docker Deployment
+
+### Building and Running with Docker
+
+#### Option 1: Docker Compose (Recommended)
+
+1. **Create a `.env` file** in the project root:
+```env
+OPENAI_API_KEY=your_openai_api_key
+
+# Neo4j Configuration (Optional - defaults provided)
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your_secure_password
+NEO4J_DATABASE=neo4j
+```
+
+**Note:** When using Docker Compose, `NEO4J_URI` is automatically set to `bolt://neo4j:7687` to connect to the Neo4j container. You don't need to set it manually.
+
+2. **Build and run:**
+```bash
+docker-compose up -d
+```
+
+This will start:
+- **Neo4j** service on ports `7474` (HTTP) and `7687` (Bolt)
+- **Backend** service on port `5000` (waits for Neo4j to be healthy)
+
+3. **View logs:**
+```bash
+# View all logs
+docker-compose logs -f
+
+# View specific service logs
+docker-compose logs -f backend
+docker-compose logs -f neo4j
+```
+
+4. **Access Neo4j Browser:**
+- Open `http://localhost:7474` in your browser
+- Login with your Neo4j credentials from `.env`
+
+5. **Stop services:**
+```bash
+docker-compose down
+
+# To also remove volumes (deletes Neo4j data):
+docker-compose down -v
+```
+
+#### Option 2: Docker Build and Run
+
+1. **Build the image:**
+```bash
+docker build -t rag-chatbot:latest .
+```
+
+2. **Run the container:**
+```bash
+docker run -d \
+  --name rag-chatbot \
+  -p 5000:5000 \
+  -e OPENAI_API_KEY=your_openai_api_key \
+  -e NEO4J_URI=neo4j+s://your_instance.databases.neo4j.io \
+  -e NEO4J_USERNAME=neo4j \
+  -e NEO4J_PASSWORD=your_password \
+  -v $(pwd)/data:/app/data \
+  rag-chatbot:latest
+```
+
+3. **View logs:**
+```bash
+docker logs -f rag-chatbot
+```
+
+4. **Stop and remove:**
+```bash
+docker stop rag-chatbot
+docker rm rag-chatbot
+```
+
+### Docker Features
+
+- **Multi-stage build** for optimized image size
+- **Health checks** to monitor container status
+- **Volume mounting** for persistent FAISS data stores and Neo4j data
+- **Service dependencies** - Backend waits for Neo4j to be healthy before starting
+- **Neo4j integration** - Full Neo4j database included in Docker Compose
+- **Environment variable** support for configuration
+- **Production-ready** with proper error handling
+
+### Neo4j Service Details
+
+The Neo4j service includes:
+- **Neo4j 5.14 Community Edition** with APOC plugins
+- **Persistent volumes** for data, logs, and imports
+- **Health checks** to ensure database is ready
+- **Automatic connection** - Backend automatically connects to Neo4j container
+- **Web interface** available at `http://localhost:7474`
+
+### Frontend Docker (Optional)
+
+To containerize the frontend:
+
+1. **Build frontend image:**
+```bash
+cd frontend
+docker build -t rag-chatbot-frontend:latest .
+```
+
+2. **Run frontend:**
+```bash
+docker run -d \
+  --name rag-chatbot-frontend \
+  -p 3000:80 \
+  rag-chatbot-frontend:latest
+```
+
+Or use the `docker-compose.yml` file and uncomment the frontend service.
+
+## Publishing to Docker Hub
+
+To publish your images to Docker Hub:
+
+1. **Login to Docker Hub:**
+```bash
+docker login
+```
+
+2. **Build and tag images:**
+```bash
+# Build images
+docker-compose build
+
+# Tag backend image (replace 'yourusername' with your Docker Hub username)
+docker tag rag-chatbot-backend:latest yourusername/rag-chatbot-backend:latest
+
+# Tag Neo4j image (optional)
+docker tag rag-chatbot-neo4j:latest yourusername/rag-chatbot-neo4j:latest
+```
+
+3. **Push to Docker Hub:**
+```bash
+docker push yourusername/rag-chatbot-backend:latest
+docker push yourusername/rag-chatbot-neo4j:latest
+```
+
+See `DOCKER_HUB.md` for detailed instructions and automation scripts.
+
+## Using Published Images (For End Users)
+
+If you want to use the published Docker images instead of building locally:
+
+### Quick Start with Published Images
+
+1. **Create a `.env` file:**
+```env
+OPENAI_API_KEY=your_openai_api_key
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your_secure_password
+```
+
+2. **Use the pull-compose file (replace 'yourusername' with the Docker Hub username):**
+```bash
+# Edit docker-compose.pull.yml and replace 'yourusername' with actual username
+# Then run:
+docker-compose -f docker-compose.pull.yml pull
+docker-compose -f docker-compose.pull.yml up -d
+```
+
+3. **Or use docker-compose.yml with image names:**
+   - Edit `docker-compose.yml` and change `build:` sections to `image: yourusername/rag-chatbot-*:latest`
+   - Then run: `docker-compose pull && docker-compose up -d`
+
+See `USER_GUIDE.md` for complete instructions on using published images.
