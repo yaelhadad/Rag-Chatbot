@@ -36,6 +36,8 @@ class AgenticRAG:
 
         # Create tools
         self.tools = self._create_tools()
+        # Create tool map for O(1) lookup
+        self.tool_map = {tool.name: tool.func for tool in self.tools}
     
     def _get_driver(self):
         """Lazy initialization of Neo4j driver - only connect when needed"""
@@ -52,64 +54,133 @@ class AgenticRAG:
         return self._driver
 
     def query(self, question: str, max_iterations: int = 5) -> dict:
-        # For now, use simple RAG without complex agent logic
-        # This ensures the system works while we fix the agent implementation
+        """
+        Execute agentic RAG query using tool calling.
+        The LLM decides which tools to use based on the question.
+        """
+        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
-        # Try to use parent-child search for documentation questions
-        if any(keyword in question.lower() for keyword in ["what", "how", "explain", "definition", "guide"]):
-            try:
-                result = self.parent_child_rag.query(question, top_k=4)
-                # Track chunks count for metadata
-                self._last_chunks_count = result['metadata'].get('parent_chunks_retrieved', 0)
+        # Bind tools to LLM for tool calling
+        llm_with_tools = self.llm.bind_tools(self.tools)
+
+        # System prompt for the agent
+        system_prompt = """You are an intelligent RAG assistant with access to multiple specialized tools.
+
+CRITICAL RULES - You MUST follow these:
+1. ALWAYS use tools to answer questions - NEVER answer from general knowledge alone
+2. For "What is X?" or "Explain X" questions → MUST use parent_child_search
+3. For "How do I implement/configure X?" questions → MUST use parent_child_search
+4. For relationship questions ("How does X connect to Y?") → MUST use graph_search
+5. For password security questions → MUST use password_strength_analyzer
+6. For multi-part questions → use MULTIPLE tools (one per part)
+
+Tool Usage Examples:
+- "What is Magic Link?" → parent_child_search("What is Magic Link authentication?")
+- "How does SSO relate to SAML?" → graph_search("SSO SAML relationship")
+- "Is password123 secure?" → password_strength_analyzer("password123")
+- "What is SSO and how does it connect to SAML?" → parent_child_search("What is SSO?") + graph_search("SSO SAML")
+
+After using tools, synthesize the information into a coherent answer with proper citations."""
+
+        # Initialize conversation
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ]
+
+        agent_steps = []
+        iteration = 0
+
+        # Agent loop
+        while iteration < max_iterations:
+            iteration += 1
+
+            # Get LLM response with potential tool calls
+            response = llm_with_tools.invoke(messages)
+
+            # Add AI message to conversation
+            messages.append(response)
+
+            # Check if LLM made tool calls
+            if not response.tool_calls:
+                # No more tool calls - this is the final answer
+                final_answer = response.content
+
+                # Extract sources from agent steps
+                sources = self._extract_sources(agent_steps)
 
                 return {
-                    "answer": result["answer"],
-                    "sources": result["sources"],
+                    "answer": final_answer,
+                    "sources": sources,
                     "metadata": {
-                        "agent_steps": [],
-                        "iterations": 0,
+                        "agent_steps": [{"tool": s["tool"], "output": s["output"][:200]} for s in agent_steps],
+                        "iterations": iteration,
                         "model_used": self.config.CHAT_MODEL_ADVANCED,
-                        "parent_chunks_retrieved": self._last_chunks_count,
-                        "strategy": "simplified_agent_parent_child"
+                        "tools_used": [s["tool"] for s in agent_steps],
+                        "strategy": "full_agent"
                     }
                 }
-            except Exception as e:
-                print(f"Parent-child search failed: {e}")
 
-        # Fallback: simple direct LLM response
-        try:
-            from langchain_core.prompts import ChatPromptTemplate
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", "You are a helpful assistant for Frontegg documentation. Answer based on your knowledge."),
-                ("human", "{question}")
-            ])
+            # Execute tool calls
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                tool_id = tool_call["id"]
 
-            chain = prompt | self.llm
-            response = chain.invoke({"question": question})
+                # Execute the tool using O(1) lookup
+                tool_func = self.tool_map.get(tool_name)
 
-            return {
-                "answer": response.content,
-                "sources": [],
-                "metadata": {
-                    "agent_steps": [],
-                    "iterations": 0,
-                    "model_used": self.config.CHAT_MODEL_ADVANCED,
-                    "parent_chunks_retrieved": 0,
-                    "strategy": "direct_llm"
-                }
+                if tool_func:
+                    try:
+                        # Get the first argument (most tools take a single string arg)
+                        arg_value = list(tool_args.values())[0] if tool_args else question
+                        tool_output = tool_func(arg_value)
+
+                        # Track the step
+                        agent_steps.append({
+                            "tool": tool_name,
+                            "input": arg_value,
+                            "output": tool_output
+                        })
+                    except Exception as e:
+                        tool_output = f"Error executing {tool_name}: {str(e)}"
+                        agent_steps.append({
+                            "tool": tool_name,
+                            "input": str(tool_args),
+                            "output": tool_output
+                        })
+                else:
+                    tool_output = f"Tool {tool_name} not found"
+                    agent_steps.append({
+                        "tool": tool_name,
+                        "input": str(tool_args),
+                        "output": tool_output
+                    })
+
+                # Add tool result to conversation
+                messages.append(ToolMessage(
+                    content=str(tool_output),
+                    tool_call_id=tool_id
+                ))
+
+        # Max iterations reached - return what we have
+        final_answer = f"Maximum iterations ({max_iterations}) reached. Based on tool results:\n\n"
+        for step in agent_steps:
+            final_answer += f"[{step['tool']}]: {step['output'][:200]}...\n\n"
+
+        sources = self._extract_sources(agent_steps)
+
+        return {
+            "answer": final_answer,
+            "sources": sources,
+            "metadata": {
+                "agent_steps": [{"tool": s["tool"], "output": s["output"][:200]} for s in agent_steps],
+                "iterations": iteration,
+                "model_used": self.config.CHAT_MODEL_ADVANCED,
+                "tools_used": [s["tool"] for s in agent_steps],
+                "strategy": "full_agent_max_iterations"
             }
-        except Exception as e:
-            return {
-                "answer": f"Error: {str(e)}",
-                "sources": [],
-                "metadata": {
-                    "agent_steps": [],
-                    "iterations": 0,
-                    "model_used": self.config.CHAT_MODEL_ADVANCED,
-                    "parent_chunks_retrieved": 0,
-                    "strategy": "error"
-                }
-            }
+        }
 
     def _create_tools(self) -> list:
         # Tool 1: Graph Search (Neo4j)
@@ -141,79 +212,6 @@ class AgenticRAG:
         )
 
         return [graph_tool, parent_child_tool, entropy_tool, password_tool]
-
-    def _create_agent(self):
-        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-        from langchain_core.messages import SystemMessage
-        from langchain.agents import create_tool_calling_agent
-
-        # Create the prompt template
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a RAG-powered assistant that MUST use tools to answer questions.
-
-MANDATORY: You MUST use parent_child_search for ANY question asking "What is X?" or "Explain X" - this searches the documentation.
-
-TOOL SELECTION (use ALL relevant tools):
-- "What is X?" / "Explain X" / "How does X work?" → MUST use parent_child_search
-- "How do I implement/configure/setup..." → MUST use parent_child_search
-- "connects to" / "relates to" / "relationships" → MUST use graph_search
-- "Is this password secure?" → MUST use password_strength_analyzer
-
-CRITICAL: For multi-part questions, you MUST use MULTIPLE tools:
-- Question: "What is Magic Link, how does it connect to JWT, is password X secure?"
-- You MUST call: parent_child_search("What is Magic Link authentication")
-- You MUST call: graph_search("Magic Link JWT connection")
-- You MUST call: password_strength_analyzer("X")
-
-DO NOT skip parent_child_search - it provides documentation context that graph_search does not have.
-DO NOT answer from general knowledge - ONLY from tool results."""),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
-
-        # Create a simple agent that uses tools directly
-        # We'll implement a custom agent that can use tools
-        from langchain_core.runnables import RunnablePassthrough
-        from langchain_core.output_parsers import StrOutputParser
-        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-        from langchain_core.tools import tool
-
-        # Create a custom agent that can handle tool calls
-        def create_custom_agent():
-            def agent_function(input_dict):
-                # Get user input
-                user_input = input_dict["input"]
-                chat_history = input_dict.get("chat_history", [])
-
-                # Create messages
-                messages = chat_history + [HumanMessage(content=user_input)]
-
-                # Get LLM response
-                response = self.llm.invoke(messages)
-
-                # Check if the response has tool calls
-                if hasattr(response, 'tool_calls') and response.tool_calls:
-                    # Return the tool calls for execution
-                    return {
-                        "output": response.content,
-                        "tool_calls": response.tool_calls,
-                        "intermediate_steps": []
-                    }
-                else:
-                    # Return the final answer
-                    return {
-                        "output": response.content,
-                        "tool_calls": [],
-                        "intermediate_steps": []
-                    }
-
-            return RunnablePassthrough.assign(output=agent_function)
-
-        # For now, return a simple agent that can be invoked
-        # We'll enhance this later with proper tool execution
-        return create_custom_agent()
 
     def _graph_search(self, query: str) -> str:
         """Search Neo4j knowledge graph for entity relationships"""
