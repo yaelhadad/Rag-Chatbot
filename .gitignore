@@ -158,3 +158,6 @@ logs/
 
 # Claude Code
 .claude/
+
+# Documentation (local only)
+DIAGRAMS.md
