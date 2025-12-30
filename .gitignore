@@ -161,3 +161,6 @@ logs/
 
 # Documentation (local only)
 DIAGRAMS.md
+
+# Publish scripts (local only)
+publish.ps1
